@@ -48,3 +48,7 @@ export CPLUS_INCLUDE_PATH="/usr/local/include"
 3d. Can compile again, either ./BUILD.sh (everything) or ./BUILD.sh generate
 3e. Should run now, and see output on `./build/generate`
 
+Other steps:
+
+- May need to remove -fno-exceptions from all mentions in CMakeLists.txt, in
+order to allow use of `throw` in the code.

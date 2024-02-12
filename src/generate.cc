@@ -13,7 +13,9 @@
 #include <limits>
 #include <random>
 #include <set>
+#include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 using namespace std;
@@ -46,11 +48,24 @@ struct Options {
     int solver = 1;
 };
 
+const int constraintsType = 3;
+// X means "force empty", number means force that number,
+// . means unconstrained.
+const std::unordered_map<int, std::string> constraintsOptions = {
+    {0, ""},
+    {1, "1XXXXXXXX.2.........3.........4.........5.........6.........7.........8.........9"},
+    // out_10.txt
+    {2, "8.5...9...............19..6..7...2.....5.8..3......68..9........4..7............."},
+    // out_14
+    {3, "....19...6.......2.78.........7...........9........6.........39.8...4.....5......"}
+};
+
 struct Generator {
     Options options_;
     Util util_{};
     vector<pair<double, string>> pattern_heap{};
     set<string> pattern_set{};
+    string constraints = constraintsOptions.at(constraintsType);
 
     explicit Generator(const Options &options) : options_(options) {}
 
@@ -86,8 +101,10 @@ struct Generator {
     double MeanLogGuesses(char *puzzle) {
         char solution[81];
         double sum_log_guesses = 0.0;
-        for (int j = 0; j < options_.num_evals; j++) {
-            util_.PermuteSudoku(puzzle, options_.pencilmark);
+        // for (int j = 0; j < options_.num_evals; j++) {
+        for (int j = 0; j < 1; j++) {
+            // We turn off permutations, since we want to compare to `constraints`.
+            // util_.PermuteSudoku(puzzle, options_.pencilmark);
             size_t guesses = 0;
             if (options_.solver == 1) {
 #ifdef MINISAT
@@ -139,6 +156,14 @@ struct Generator {
             loss = num_clues * options_.clue_weight
                    - exp(mean_log_guesses * options_.guess_weight)
                    + util_.RandomDouble() * options_.random_weight;
+            // Try to stay close to `constraints`.
+            double num_changes = 0.;
+            for (int i = 0; i < 81; i++) {
+                if (constraints[i] != eval_puzzle[i]) {
+                    num_changes += 1.0;
+                }
+            }
+            loss += num_changes;
         } else {
             loss = numeric_limits<double>::max();
         }
@@ -186,6 +211,10 @@ struct Generator {
                 if (dropped == options_.clues_to_drop) {
                     break;
                 }
+                // Never drop constrained cells.
+                if (constraints[j] != '.') {
+                    continue;
+                }
                 if (puzzle[j] == '.') {
                     if (options_.pencilmark) {
                         puzzle[j] = (char) ('1' + (j % 9));
@@ -202,11 +231,11 @@ struct Generator {
             // randomly complete and minimize
 
             if (options_.clues_to_drop > 0) {
-                if (!TdokuConstrain(options_.pencilmark, puzzle)) {
+                if (!TdokuConstrain(options_.pencilmark, puzzle, constraints)) {
                     continue;
                 }
                 if (options_.minimize) {
-                    TdokuMinimize(options_.pencilmark, false, puzzle);
+                    TdokuMinimize(options_.pencilmark, false, puzzle, constraints);
                 }
             }
 

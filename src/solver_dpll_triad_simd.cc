@@ -3,7 +3,10 @@
 #include "util.h"
 
 #include <array>
+#include <string>
 #include <cstring>
+#include <stdexcept>
+#include <iostream>
 
 #define LIKELY(x) __builtin_expect(!!(x),1)
 
@@ -15,6 +18,8 @@ using Cells08 = Bitvec08x16;
 using Cells16 = Bitvec16x16;
 
 constexpr uint16_t kAll = 0x1ff;
+typedef tuple<int, int, int> RowColBox;
+const string kEmptyConstraints(729, '.');
 
 //  The state of each box is stored in a vector of 16 uint16_t,     +---+---+---+---+
 //  arranged as a 4x4 matrix of 9-bit candidate sets (the high      | c | c | c | H |
@@ -704,12 +709,35 @@ struct GeneratorDpllTriadSimd {
     // different puzzles may arise with widely varying probabilities and we make no effort
     // to adjust for these differences or to estimate these probabilities. it also does not
     // guarantee that the resulting puzzle is minimal.
-    bool Constrain(bool pencilmark, char *puzzle) {
+    bool Constrain(bool pencilmark, char *puzzle,
+                   const std::string& constraints,
+                   const std::string& solnConstraints) {
+        if (constraints != string(81, '.') && pencilmark) {
+            throw std::runtime_error("Constraints with pencilmark unsupported.");
+        }
+        if (solnConstraints != string(81, '.') && pencilmark) {
+            throw std::runtime_error("solnConstraints with pencilmark unsupported.");
+        }
+        // We will use the `2` suffix for the version which includes 
+        // solution constraints.
+        // Initialize puzzle2 to solutionConstraints
+        char puzzle2[81];
+        for (int i = 0; i < 81; i++) {
+            if (solnConstraints[i] != '.') {
+                if (puzzle[i] != '.' || constraints[i] != 'X') {
+                    throw std::runtime_error("unexpected");
+                }
+            }
+            puzzle2[i] = solnConstraints[i] == '.' ? puzzle[i] : solnConstraints[i];
+        }
+        bool hasSolutionConstraints = solnConstraints != string(81, '.');
         State state;
+        State state2;
         if (pencilmark) {
             SolverDpllTriadSimd<0>::InitPencilmarkByBox(puzzle, state);
         } else {
             SolverDpllTriadSimd<0>::InitVanillaByBand(puzzle, state);
+            SolverDpllTriadSimd<0>::InitVanillaByBand(puzzle2, state2);
         }
         vector<int> permutation = util_.Permutation(729);
         for (int literal : permutation) {
@@ -720,46 +748,102 @@ struct GeneratorDpllTriadSimd {
                 if (puzzle[literal] == '.') continue;
             } else {
                 if (puzzle[cell] != '.') continue;
+                if (constraints[cell] != '.') continue;
             }
 
             int row = cell / 9, col = cell % 9;
             int box_idx = (row / 3) * 3 + (col / 3);
             int elm_idx = (row % 3) * 4 + (col % 3);
             Box &box = state.boxen[box_idx];
-            uint16_t candidates = box.cells.Extract(elm_idx);
+            Box &box2 = state2.boxen[box_idx];
+            uint16_t candidates1 = box.cells.Extract(elm_idx);
+            uint16_t candidates2 = box2.cells.Extract(elm_idx);
+            uint16_t candidates = candidates1 & candidates2;
             uint16_t candidate = 1u << (literal % 9u);
 
-            // quick check that the candidate is not trivially included or excluded before
-            // adding as a clue.
-            if ((candidates & candidate) && (candidates != candidate)) {
+            // quick check that the candidate is not either
+            // a) Trivially excluded by puzzle with solutionConstraints
+            // b) Trivially included by puzzle
+            if ((candidates & candidate) && (candidates1 != candidate)) {
                 Cells16 restrict = box.cells;
+                Cells16 restrict2 = box2.cells;
                 restrict.Insert(elm_idx, pencilmark ? candidates ^ candidate : candidate);
+                restrict2.Insert(elm_idx, candidate);
                 State test_state = state;
-                if (SolverDpllTriadSimd<0>::BoxRestrict<0>(test_state, box_idx, restrict)) {
+                State test_state2 = state2;
+                auto is_valid = SolverDpllTriadSimd<0>::BoxRestrict<0>(test_state, box_idx, restrict);
+                auto is_valid2 = SolverDpllTriadSimd<0>::BoxRestrict<0>(test_state2, box_idx, restrict2);
+                if (is_valid && is_valid2) {
                     int cell_or_literal = pencilmark ? literal : cell;
                     char prior_unconstrained_value = puzzle[cell_or_literal];
                     puzzle[cell_or_literal] = pencilmark ? '.' : (char)('1' + (literal % 9));
-                    switch (solver_.SafeCountSolutionsConsistentWithPartialAssignment(
-                            test_state, 2)) {
-                        case 0:
-                            puzzle[cell_or_literal] = prior_unconstrained_value;
-                            continue;
-                        case 1:
-                            return true;
-                        default:
-                            state = test_state;
-                            continue;
+                    puzzle2[cell_or_literal] = (char)('1' + (literal % 9));
+                    auto solnCount = solver_.SafeCountSolutionsConsistentWithPartialAssignment(
+                        test_state, 2);
+                    size_t solnCount2;
+                    if (hasSolutionConstraints) {
+                        solnCount2 = solver_.SafeCountSolutionsConsistentWithPartialAssignment(
+                            test_state2, 2);
+                        // cout << "progress " << solnCount << " " << solnCount2 << endl;
                     }
-                }
+                    switch (solnCount) {
+                        // This wouldn't be possible anyways, no need to resolve.
+                        case 0:
+                            if (hasSolutionConstraints && solnCount2 > 0) throw std::runtime_error(">0");
+                            puzzle[cell_or_literal] = prior_unconstrained_value;
+                            puzzle2[cell_or_literal] = prior_unconstrained_value;
+                            continue;
+                        // This might not be the right solution.
+                        case 1:
+                            if (hasSolutionConstraints) {
+                                if (solnCount2 == 1) return true;
+                                else if (solnCount2 > 1) throw std::runtime_error(">1");
+                                else if (solnCount2 == 0) {
+                                    puzzle[cell_or_literal] = prior_unconstrained_value;
+                                    puzzle2[cell_or_literal] = prior_unconstrained_value;
+                                    continue;
+                                }
+                            }
+                            else {
+                                return true;
+                            }
+                        default:
+                            if (hasSolutionConstraints && solnCount2 == 0) {
+                                puzzle[cell_or_literal] = prior_unconstrained_value;
+                                puzzle2[cell_or_literal] = prior_unconstrained_value;
+                                continue;
+                            }
+                            else {
+                                state = test_state;
+                                state2 = test_state2;
+                                continue;
+                            }
+                    }
+                } 
+                // else {
+                //     cout << "resulting grid is unsolvableV " << is_valid << " " << is_valid2 << endl;
+                // }
             }
+            // else {cout << "candidate trivially included/excluded "
+            //            << (candidates & candidate) << " " << (candidate != candidates1) << endl;}
         }
+        cout << "failed" << endl;
         return false;
     }
 
     // minimizes a vanilla or pencilmark puzzle by testing removal of all clues in random order,
     // restoring any clue that's required to keep the solution unique. if the 'monotonic' flag
     // is passed, returns true only if we had a minimal puzzle after the first restored clue.
-    bool Minimize(bool pencilmark, bool monotonic, char *puzzle) {
+    bool Minimize(bool pencilmark, bool monotonic, char *puzzle, const std::string& constraints = "") {
+        if (constraints.empty()) {
+            string nullConstraints;
+            if (pencilmark) {
+                nullConstraints = string(729, '.');
+            } else {
+                nullConstraints = string(81, '.');
+            }
+            return Minimize(pencilmark, monotonic, puzzle, nullConstraints);
+        }
         bool restored_clue = false;
         vector<int> permutation = util_.Permutation(729);
         for (int cell_or_literal : permutation) {
@@ -768,6 +852,7 @@ struct GeneratorDpllTriadSimd {
             } else {
                 if (cell_or_literal >= 81 || puzzle[cell_or_literal] == '.') continue;
             }
+            if (constraints[cell_or_literal] != '.') continue;
             char constraint = puzzle[cell_or_literal];
             State state;
             if (pencilmark) {
@@ -818,11 +903,14 @@ size_t TdokuEnumerate(const char *puzzle, size_t limit,
 }
 
 extern "C"
-bool TdokuConstrain(bool pencilmark, char *puzzle) {
-    return generator.Constrain(pencilmark, puzzle);
+bool TdokuConstrain(bool pencilmark,
+                    char *puzzle,
+                    const std::string& constraints,
+                    const std::string& solnConstraints) {
+    return generator.Constrain(pencilmark, puzzle, constraints, solnConstraints);
 }
 
 extern "C"
-bool TdokuMinimize(bool pencilmark, bool monotonic, char *puzzle) {
-    return generator.Minimize(pencilmark, monotonic, puzzle);
+bool TdokuMinimize(bool pencilmark, bool monotonic, char *puzzle, const std::string& constraints) {
+    return generator.Minimize(pencilmark, monotonic, puzzle, constraints);
 }

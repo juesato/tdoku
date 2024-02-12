@@ -4,6 +4,7 @@
 #ifdef __cplusplus
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #else
 #include <stdbool.h>
 #include <stddef.h>
@@ -24,9 +25,12 @@ size_t TdokuEnumerate(const char *puzzle,
                       void (*callback)(const char *, void *),
                       void *callback_arg);
 
-bool TdokuConstrain(bool pencilmark, char *puzzle);
+bool TdokuConstrain(bool pencilmark,
+                    char *puzzle,
+                    const std::string& constraints = std::string(81, '.'),
+                    const std::string& solnConstraints = std::string(81, '.'));
 
-bool TdokuMinimize(bool pencilmark, bool monotonic, char *puzzle);
+bool TdokuMinimize(bool pencilmark, bool monotonic, char *puzzle, const std::string& constraints = "");
 #ifdef __cplusplus
 }
 #endif
